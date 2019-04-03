@@ -1,0 +1,376 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  PACSVPC1:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      InstanceTenancy: default
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      Tags:
+        - Key: Name
+          Value: PACS_4141_VPC
+  publicSUB1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: ca-central-1a
+      VpcId: !Ref PACSVPC1
+      Tags:
+        - Key: Name
+          Value: PACS_Pub_SUB
+  igw1:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: PACS_IGW
+  dhcpoptions1:
+    Type: 'AWS::EC2::DHCPOptions'
+    Properties:
+      DomainName: ca-central-1.compute.internal
+      DomainNameServers:
+        - AmazonProvidedDNS
+  networkacl1:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref PACSVPC1
+      Tags:
+        - Key: Name
+          Value: PACS_ACL
+  routetable1:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref PACSVPC1
+  rtbd206a7ba:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref PACSVPC1
+  MST1:
+    Type: 'AWS::EC2::Instance'
+    Metadata:
+      Comment: Prepare the partitions for imsdb image bin and the swap before doing a yum update
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+               [main]
+               stack=${AWS::StackId}
+               region=${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.MST1.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource MST1 --region ${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"          
+          commands:
+            10_parted_imsdb:
+              command: "parted /dev/xvdb mklabel gpt"
+            15_parted_imagebin:
+              command: "parted /dev/xvdc mklabel gpt"
+            20_mkpart_imsdb:
+              command: "parted -a opt /dev/xvdb mkpart primary ext4 0% 100%"
+            25_mkpart_imagebin:
+              command: "parted -a opt /dev/xvdc mkpart primary ext4 0% 100%"
+            30_format_imsdb:
+              command: "mkfs.ext4 /dev/xvdb1"
+            35_format_imagebin:
+              command: "mkfs.ext4 /dev/xvdc1"
+            40_createdir_imsdb:
+              command: "mkdir /opt/imsdb"
+            45_createdir_imagebin:
+              command: "mkdir /usr/local/PACS"
+            50_put_imsdb_in_fstab:
+              command: "echo \"UUID=$(sudo blkid -s UUID -o value /dev/xvdb1)        /opt/imsdb    ext4    defaults,errors=remount-ro,barrier=1,data=ordered    1    2\" >> /etc/fstab"
+            55_put_imagebin_in_fstab:
+              command: "echo \"UUID=$(sudo blkid -s UUID -o value /dev/xvdc1)        /usr/local/PACS    ext4    defaults,errors=remount-ro,barrier=1,data=ordered    1    2\" >> /etc/fstab"
+            60_create_swap:
+              command: "mkswap /dev/xvdd"
+            65_attach_swap:
+              command: "swapon /dev/xvdd"
+            70_put_swap_in_fstab:
+              command: "echo \"UUID=$(sudo blkid -s UUID -o value /dev/xvdd)       none    swap    defaults  0       0\" >> /etc/fstab"
+            75_mount_all:
+              command: "mount -a"
+            80_yum_update:
+              command: "yum update -y"
+            85_clear_yum_cache:
+              command: "yum clean all"
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+    Properties:
+      DisableApiTermination: 'false'
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: ami-dcad28b8
+      InstanceType: t2.large
+      KeyName: id_rsa_100
+      BlockDeviceMappings: 
+         - DeviceName: "/dev/sda1"
+           Ebs: 
+             VolumeType: "gp2"
+             DeleteOnTermination: "true"
+             VolumeSize: "27"      
+      Monitoring: 'false'
+      Tags:
+        - Key: Name
+          Value: PACS_414mst1_EC2
+      Volumes:
+        - Device: /dev/sdb
+          VolumeId: !Ref mst1imsdbvol
+        - Device: /dev/sdc
+          VolumeId: !Ref mst1imagesvol
+        - Device: /dev/sdd
+          VolumeId: !Ref mst1swapvol
+      NetworkInterfaces:
+        - DeleteOnTermination: 'true'
+          Description: Primary network interface
+          DeviceIndex: 0
+          SubnetId: !Ref publicSUB1
+          PrivateIpAddresses:
+            - PrivateIpAddress: 10.0.0.24
+              Primary: 'true'
+          GroupSet:
+            - !Ref sgPACSSG1
+          AssociatePublicIpAddress: 'true'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum install -y epel-release
+          /usr/bin/easy_install --script-dir /opt/aws/bin https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+          cp -v /usr/lib/python2*/site-packages/aws_cfn_bootstrap*/init/redhat/cfn-hup /etc/init.d
+          chmod +x /etc/init.d/cfn-hup
+          # Start cfn-init
+          /opt/aws/bin/cfn-init --stack ${AWS::StackId} --resource MST1 --region ${AWS::Region}
+          # Start up the cfn-hup daemon to listen for changes to the EC2 instance metadata
+          /opt/aws/bin/cfn-hup
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource MST1 --region ${AWS::Region}
+  MST2:
+    Type: 'AWS::EC2::Instance'
+    Metadata:
+      Comment: Prepare the partitions for imsdb image bin and the swap before doing a yum update
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+               [main]
+               stack=${AWS::StackId}
+               region=${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.MST2.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource MST2 --region ${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"          
+          commands:
+            10_parted_imsdb:
+              command: "parted /dev/xvdb mklabel gpt"
+            15_parted_imagebin:
+              command: "parted /dev/xvdc mklabel gpt"
+            20_mkpart_imsdb:
+              command: "parted -a opt /dev/xvdb mkpart primary ext4 0% 100%"
+            25_mkpart_imagebin:
+              command: "parted -a opt /dev/xvdc mkpart primary ext4 0% 100%"
+            30_format_imsdb:
+              command: "mkfs.ext4 /dev/xvdb1"
+            35_format_imagebin:
+              command: "mkfs.ext4 /dev/xvdc1"
+            40_createdir_imsdb:
+              command: "mkdir /opt/imsdb"
+            45_createdir_imagebin:
+              command: "mkdir /usr/local/PACS"
+            50_put_imsdb_in_fstab:
+              command: "echo \"UUID=$(sudo blkid -s UUID -o value /dev/xvdb1)        /opt/imsdb    ext4    defaults,errors=remount-ro,barrier=1,data=ordered    1    2\" >> /etc/fstab"
+            55_put_imagebin_in_fstab:
+              command: "echo \"UUID=$(sudo blkid -s UUID -o value /dev/xvdc1)        /usr/local/PACS    ext4    defaults,errors=remount-ro,barrier=1,data=ordered    1    2\" >> /etc/fstab"
+            60_create_swap:
+              command: "mkswap /dev/xvdd"
+            65_attach_swap:
+              command: "swapon /dev/xvdd"
+            70_put_swap_in_fstab:
+              command: "echo \"UUID=$(sudo blkid -s UUID -o value /dev/xvdd)       none    swap    defaults  0       0\" >> /etc/fstab"
+            75_mount_all:
+              command: "mount -a"
+            80_yum_update:
+              command: "yum update -y"
+            85_clear_yum_cache:
+              command: "yum clean all"
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+    Properties:
+      DisableApiTermination: 'false'
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: ami-dcad28b8
+      InstanceType: t2.large
+      KeyName: id_rsa_100
+      BlockDeviceMappings: 
+         - DeviceName: "/dev/sda1"
+           Ebs: 
+             VolumeType: "gp2"
+             DeleteOnTermination: "true"
+             VolumeSize: "27"
+      Monitoring: 'false'
+      Tags:
+        - Key: Name
+          Value: PACS_414mst2_EC2
+      Volumes:
+        - Device: /dev/sdb
+          VolumeId: !Ref mst2imsdbvol
+        - Device: /dev/sdc
+          VolumeId: !Ref mst2imagesvol
+        - Device: /dev/sdd
+          VolumeId: !Ref mst2swapvol
+      NetworkInterfaces:
+        - DeleteOnTermination: 'true'
+          Description: Primary network interface
+          DeviceIndex: 0
+          SubnetId: !Ref publicSUB1
+          PrivateIpAddresses:
+            - PrivateIpAddress: 10.0.0.61
+              Primary: 'true'
+          GroupSet:
+            - !Ref sgPACSSG1
+          AssociatePublicIpAddress: 'true'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum install -y epel-release
+          /usr/bin/easy_install --script-dir /opt/aws/bin https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+          cp -v /usr/lib/python2*/site-packages/aws_cfn_bootstrap*/init/redhat/cfn-hup /etc/init.d
+          chmod +x /etc/init.d/cfn-hup
+          # Start cfn-init
+          /opt/aws/bin/cfn-init --stack ${AWS::StackId} --resource MST2 --region ${AWS::Region}
+          # Start up the cfn-hup daemon to listen for changes to the EC2 instance metadata
+          /opt/aws/bin/cfn-hup
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource MST2 --region ${AWS::Region}
+  mst2imsdbvol:
+    Type: 'AWS::EC2::Volume'
+    Properties:
+      AvailabilityZone: ca-central-1a
+      Size: '25'
+      VolumeType: gp2
+      Tags:
+        - Key: Name
+          Value: PACS_imsdb_mst2_VOL
+  mst1imsdbvol:
+    Type: 'AWS::EC2::Volume'
+    Properties:
+      AvailabilityZone: ca-central-1a
+      Size: '25'
+      VolumeType: gp2
+      Tags:
+        - Key: Name
+          Value: PACS_imsdb_mst1_VOL
+  mst1swapvol:
+    Type: 'AWS::EC2::Volume'
+    Properties:
+      AvailabilityZone: ca-central-1a
+      Size: '8'
+      VolumeType: gp2
+      Tags:
+        - Key: Name
+          Value: PACS_swap_mst1_VOL
+  mst2imagesvol:
+    Type: 'AWS::EC2::Volume'
+    Properties:
+      AvailabilityZone: ca-central-1a
+      Size: '6'
+      VolumeType: gp2
+      Tags:
+        - Key: Name
+          Value: PACS_images_mst2_VOL
+  mst2swapvol:
+    Type: 'AWS::EC2::Volume'
+    Properties:
+      AvailabilityZone: ca-central-1a
+      Size: '8'
+      VolumeType: gp2
+      Tags:
+        - Key: Name
+          Value: PACS_swap_mst2_VOL
+  mst1imagesvol:
+    Type: 'AWS::EC2::Volume'
+    Properties:
+      AvailabilityZone: ca-central-1a
+      Size: '6'
+      VolumeType: gp2
+      Tags:
+        - Key: Name
+          Value: PACS_images_mst1_VOL
+  sgPACSSG1:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: PACS Security Group
+      VpcId: !Ref PACSVPC1
+  acl1:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: 'true'
+      Protocol: '-1'
+      RuleAction: allow
+      RuleNumber: '100'
+      NetworkAclId: !Ref networkacl1
+  acl2:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Protocol: '-1'
+      RuleAction: allow
+      RuleNumber: '100'
+      NetworkAclId: !Ref networkacl1
+  subnetacl1:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      NetworkAclId: !Ref networkacl1
+      SubnetId: !Ref publicSUB1
+  gw1:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref PACSVPC1
+      InternetGatewayId: !Ref igw1
+  subnetroute1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref routetable1
+      SubnetId: !Ref publicSUB1
+  route1:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref routetable1
+      GatewayId: !Ref igw1
+    DependsOn: gw1
+  dchpassoc1:
+    Type: 'AWS::EC2::VPCDHCPOptionsAssociation'
+    Properties:
+      VpcId: !Ref PACSVPC1
+      DhcpOptionsId: !Ref dhcpoptions1  
+  ingress1:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref sgPACSSG1
+      IpProtocol: '-1'
+      CidrIp: 10.0.0.0/16
+  egress1:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      GroupId: !Ref sgPACSSG1
+      IpProtocol: '-1'
+      CidrIp: 0.0.0.0/0
+Description: PACS Template 2018-03-23
