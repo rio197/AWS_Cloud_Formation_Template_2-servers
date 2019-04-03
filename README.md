@@ -53,6 +53,7 @@ The log files to cfn-init (the AWS utility that verifies and runs the contents o
 2018-03-26 20:13:12,719 P8946 [INFO] ------------------------------------------------------------
 2018-03-26 20:13:12,719 P8946 [INFO] Completed successfully.
 
+
 cfn-hup is the AWS utility that listens to any manual modifications to the stack during its lifetime.
 
 cfn-signal is the AWS utility that sends a signal, e.g. SUCCESS, FAIL, etc. to AWS CloudFormation at the end of resource creation. In the present template it is used in the EC2 instance sections.*/
